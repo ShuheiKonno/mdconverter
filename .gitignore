@@ -17,6 +17,7 @@ ENV/
 # PyInstaller
 build/build/
 build/dist/
+build/mdconverter/
 dist/
 *.spec.bak
 
