@@ -9,7 +9,7 @@ def main() -> int:
     # Import lazily so that import errors are reported after Python has
     # finished setting up the interpreter, which improves error messages
     # on Windows when bundled with PyInstaller.
-    from .app import launch
+    from mdconverter.app import launch
 
     return launch()
 
