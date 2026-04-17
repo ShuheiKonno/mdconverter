@@ -29,6 +29,9 @@ build/mdconverter/
 codex-*.log
 codex-session-*.json
 
+# Claude Octopus (per-machine session state)
+.claude-octopus/
+
 # IDE / editors
 .vscode/
 .idea/
