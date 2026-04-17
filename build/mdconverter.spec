@@ -4,9 +4,11 @@
 #
 # Run from the repo root (NOT from inside the `build/` directory):
 #
-#     pyinstaller build/mdconverter.spec --clean --noconfirm
+#     pyinstaller build/mdconverter.spec --clean --noconfirm --distpath .
 #
-# Output: dist/mdconverter.exe (Windows)
+# Output: ./mdconverter.exe (Windows) — the `--distpath .` flag redirects
+# PyInstaller's default `dist/` directory to the project root so we never
+# create a `dist/` folder.
 #
 # Notes
 # -----

@@ -58,8 +58,8 @@ python -m mdconverter
 
 ```powershell
 pip install -e ".[build]"
-pyinstaller build/mdconverter.spec --clean --noconfirm
-# => dist\mdconverter.exe
+pyinstaller build/mdconverter.spec --clean --noconfirm --distpath .
+# => mdconverter.exe (プロジェクトルート直下)
 ```
 
 ## プロジェクト構成

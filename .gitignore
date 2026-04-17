@@ -16,10 +16,18 @@ ENV/
 
 # PyInstaller
 build/build/
-build/dist/
 build/mdconverter/
-dist/
 *.spec.bak
+
+# Build artifacts (output at project root)
+/mdconverter.exe
+
+# Codex CLI
+.codex/
+.codex-*/
+.codex-*
+codex-*.log
+codex-session-*.json
 
 # IDE / editors
 .vscode/

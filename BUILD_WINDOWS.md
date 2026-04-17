@@ -89,22 +89,25 @@ python -m mdconverter
 リポジトリルートで (重要: `build\` の中ではなく **ルート** から実行):
 
 ```powershell
-pyinstaller build\mdconverter.spec --clean --noconfirm
+pyinstaller build\mdconverter.spec --clean --noconfirm --distpath .
 ```
 
 成功すると以下が生成されます:
 
 ```
-dist\mdconverter.exe        ← 配布物 (単一ファイル)
+mdconverter.exe             ← 配布物 (単一ファイル・プロジェクトルート直下)
 build\mdconverter\          ← 中間生成物 (無視して可)
 ```
+
+> `--distpath .` を付けることで PyInstaller 既定の `dist\` を作らず、
+> 直接プロジェクトルートに `.exe` を書き出します。
 
 ---
 
 ## 6. 生成された `.exe` の確認
 
 ```powershell
-.\dist\mdconverter.exe
+.\mdconverter.exe
 ```
 
 - 別の Windows マシン (Python 未インストール) でも動くかを確認すると
@@ -201,11 +204,11 @@ dependencies = [
 
 ## 8. 配布
 
-`dist\mdconverter.exe` を ZIP に入れて配布するか、GitHub Releases
+`mdconverter.exe` を ZIP に入れて配布するか、GitHub Releases
 にアップロードします。単一ファイルなのでインストーラは不要です。
 
 ```powershell
-Compress-Archive -Path dist\mdconverter.exe -DestinationPath mdconverter-win-x64.zip
+Compress-Archive -Path mdconverter.exe -DestinationPath mdconverter-win-x64.zip
 ```
 
 ---
@@ -223,9 +226,9 @@ pip install -e ".[build]"
 python -m mdconverter
 
 # クリーンビルド
-pyinstaller build\mdconverter.spec --clean --noconfirm
+pyinstaller build\mdconverter.spec --clean --noconfirm --distpath .
 
 # キャッシュも含めて完全クリーン
-Remove-Item -Recurse -Force build\build, build\mdconverter, dist -ErrorAction SilentlyContinue
-pyinstaller build\mdconverter.spec --clean --noconfirm
+Remove-Item -Recurse -Force build\build, build\mdconverter, mdconverter.exe -ErrorAction SilentlyContinue
+pyinstaller build\mdconverter.spec --clean --noconfirm --distpath .
 ```
