@@ -117,6 +117,13 @@ class Converter:
             result = self._md.convert_stream(
                 stream,
                 file_extension=src.suffix or None,
+                # Embed images as base64 data URIs in the Markdown output.
+                # Without this, markitdown's default behaviour truncates
+                # data: URIs to "data:image/png;base64..." and PPTX pictures
+                # become dangling references like ![](Picture1.jpg), leaving
+                # the reader with broken image links. Enabling this keeps the
+                # .md file self-contained at the cost of a larger payload.
+                keep_data_uris=True,
             )
 
         dst.write_text(result.text_content or "", encoding="utf-8")
@@ -146,7 +153,7 @@ class Converter:
         if cancel_event is not None and cancel_event.is_set():
             raise CancelledError("conversion cancelled by user")
 
-        result = self._md.convert_uri(uri)
+        result = self._md.convert_uri(uri, keep_data_uris=True)
 
         if cancel_event is not None and cancel_event.is_set():
             raise CancelledError("conversion cancelled by user")
