@@ -24,7 +24,6 @@ build/mdconverter/
 
 # Codex CLI
 .codex/
-.codex-*/
 .codex-*
 codex-*.log
 codex-session-*.json

@@ -38,18 +38,17 @@ jobs:
       - name: Build with PyInstaller
         shell: pwsh
         run: |
-          pyinstaller build/mdconverter.spec --clean --noconfirm
+          pyinstaller build/mdconverter.spec --clean --noconfirm --distpath .
 
       - name: Show build output
         shell: pwsh
         run: |
-          Get-ChildItem dist
-          Get-Item dist\mdconverter.exe | Format-List Name, Length, LastWriteTime
+          Get-Item mdconverter.exe | Format-List Name, Length, LastWriteTime
 
       - name: Upload .exe artifact
         uses: actions/upload-artifact@v4
         with:
           name: mdconverter-windows-x64
-          path: dist/mdconverter.exe
+          path: mdconverter.exe
           retention-days: 90
           if-no-files-found: error
