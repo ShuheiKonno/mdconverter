@@ -350,7 +350,21 @@ class MdConverterApp:
             messagebox.showwarning("出力先未指定", "出力先フォルダを指定してください。")
             return
         target = Path(os.path.expanduser(raw))
-        if not target.exists():
+
+        # Reject paths that exist but are not directories. Without this
+        # check, a user who types a file path (or typoes one) would cause
+        # ``os.startfile`` to launch that arbitrary file — e.g. an .exe —
+        # which is a meaningful security surface for a tool whose UI only
+        # promises to open a folder.
+        if target.exists() and not target.is_dir():
+            messagebox.showerror(
+                "パスエラー",
+                f"{target}\nはフォルダではありません。"
+                "出力先にはフォルダを指定してください。",
+            )
+            return
+
+        if not target.is_dir():
             if not messagebox.askyesno(
                 "フォルダが存在しません",
                 f"{target}\nはまだ存在しません。作成して開きますか？",

@@ -138,10 +138,10 @@ class Converter:
                     # data-URI images in Markdown or lets them bloat the
                     # payload into irrelevant tokens. Any remaining broken
                     # image references are stripped by
-                    # ``_strip_data_uri_images`` below.
+                    # ``_strip_image_references`` below.
                     keep_data_uris=False,
                 )
-            text_content = _strip_data_uri_images(result.text_content or "")
+            text_content = _strip_image_references(result.text_content or "")
 
         dst.write_text(text_content, encoding="utf-8")
 
@@ -258,7 +258,7 @@ class Converter:
 
         dst = _unique_path(out_dir / (_slug_from_uri(uri) + ".md"))
         dst.write_text(
-            _strip_data_uri_images(result.text_content or ""),
+            _strip_image_references(result.text_content or ""),
             encoding="utf-8",
         )
 
@@ -346,20 +346,37 @@ _URI_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://")
 
 # Matches Markdown image references that embed data URIs, whether the URI is
 # the full base64 payload or the truncated placeholder markitdown produces
-# with ``keep_data_uris=False`` (e.g. ``data:image/png;base64...``). These
-# references are useless to the AI-service consumers this tool targets —
-# Claude / ChatGPT / NotebookLM ignore them, and RAG pipelines waste tokens
-# on them — so we strip them out entirely.
+# with ``keep_data_uris=False`` (e.g. ``data:image/png;base64...``).
 _DATA_URI_IMG_RE = re.compile(r"!\[[^\]]*\]\(\s*data:[^)]*\)")
+# Matches Markdown image references whose target looks like an image file —
+# either a bare placeholder emitted by markitdown (``![](Picture1.jpg)``) or
+# an actual HTTP URL ending in an image extension. Both forms are useless to
+# the AI-service consumers this tool targets: local placeholders are dangling
+# (the image file isn't shipped alongside the .md), and remote URLs are
+# ignored by Claude / ChatGPT / NotebookLM when embedded in Markdown.
+# We deliberately do NOT touch regular Markdown links (``[text](url)``
+# without the leading ``!``), only image references.
+_FILE_IMG_RE = re.compile(
+    r"!\[[^\]]*\]\([^)]*\.(?:jpg|jpeg|png|gif|webp|svg|bmp|tiff?|ico|heic)"
+    r"[^)]*\)",
+    re.IGNORECASE,
+)
 # Collapse 3+ consecutive blank lines left behind by the stripping, keeping
 # the output tidy without disturbing legitimate paragraph breaks.
 _EXTRA_BLANKS_RE = re.compile(r"\n{3,}")
 
 
-def _strip_data_uri_images(text: str) -> str:
+def _strip_image_references(text: str) -> str:
+    """Remove Markdown image markup from *text*.
+
+    Strips both data-URI images and image-file references (local
+    placeholders like ``![](Picture1.jpg)`` and remote URLs ending in an
+    image extension). See the regex docstrings above for the rationale.
+    """
     if not text:
         return text
     stripped = _DATA_URI_IMG_RE.sub("", text)
+    stripped = _FILE_IMG_RE.sub("", stripped)
     return _EXTRA_BLANKS_RE.sub("\n\n", stripped)
 
 
