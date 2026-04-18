@@ -25,8 +25,10 @@ widgets on the Tk main loop.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import subprocess
 import sys
 import traceback
 from pathlib import Path
@@ -36,6 +38,7 @@ from typing import List, Optional
 import customtkinter as ctk
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
+from . import __version__
 from .converter import Converter
 from .worker import (
     Cancelled,
@@ -51,6 +54,34 @@ from .worker import (
 )
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Persistent settings — the user's last-chosen output directory is remembered
+# across runs. Stored as a small JSON file in the user's home directory so it
+# works identically whether the app is run from source or from the PyInstaller
+# .exe (both see the same %USERPROFILE%).
+
+_SETTINGS_PATH = Path.home() / ".mdconverter.json"
+
+
+def _load_settings() -> dict:
+    try:
+        with _SETTINGS_PATH.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        # Missing file or malformed JSON — treat as "no saved settings".
+        return {}
+
+
+def _save_settings(settings: dict) -> None:
+    try:
+        with _SETTINGS_PATH.open("w", encoding="utf-8") as fh:
+            json.dump(settings, fh, ensure_ascii=False, indent=2)
+    except OSError as exc:
+        # Non-fatal: the app keeps working, the choice just won't persist.
+        log.warning("failed to write %s: %s", _SETTINGS_PATH, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +112,7 @@ class MdConverterApp:
         ctk.set_default_color_theme("blue")
 
         self.root = _DnDCTk()
-        self.root.title("mdconverter - Markdown Converter")
+        self.root.title(f"mdconverter v{__version__} - Markdown Converter")
         self.root.geometry("820x640")
         self.root.minsize(720, 540)
 
@@ -89,7 +120,12 @@ class MdConverterApp:
         self.worker: Optional[ConversionWorker] = None
 
         self._sources: List[str] = []
-        self._output_dir: Path = Path.home() / "mdconverter_output"
+        self._settings = _load_settings()
+        saved_output = self._settings.get("output_dir")
+        if isinstance(saved_output, str) and saved_output.strip():
+            self._output_dir: Path = Path(saved_output)
+        else:
+            self._output_dir = Path.home() / "mdconverter_output"
 
         self._build_ui()
         self._register_drop_targets()
@@ -125,7 +161,10 @@ class MdConverterApp:
         self.out_entry.insert(0, str(self._output_dir))
         ctk.CTkButton(
             out_frame, text="参照", width=80, command=self._on_pick_output
-        ).grid(row=0, column=2, padx=(6, 12), pady=10)
+        ).grid(row=0, column=2, padx=(6, 6), pady=10)
+        ctk.CTkButton(
+            out_frame, text="開く", width=80, command=self._on_open_output
+        ).grid(row=0, column=3, padx=(0, 12), pady=10)
 
         # --- Buttons -----------------------------------------------------
         btn_frame = ctk.CTkFrame(root, fg_color="transparent")
@@ -178,8 +217,17 @@ class MdConverterApp:
             row=4, column=0, sticky="w", padx=16, pady=(6, 0)
         )
         self.log_box = ctk.CTkTextbox(root, height=160)
-        self.log_box.grid(row=5, column=0, sticky="nsew", padx=12, pady=(0, 12))
+        self.log_box.grid(row=5, column=0, sticky="nsew", padx=12, pady=(0, 4))
         self.log_box.configure(state="disabled")
+
+        # --- Version footer ---------------------------------------------
+        ctk.CTkLabel(
+            root,
+            text=f"mdconverter v{__version__}",
+            anchor="e",
+            text_color=("gray50", "gray60"),
+            font=ctk.CTkFont(size=10),
+        ).grid(row=6, column=0, sticky="e", padx=14, pady=(0, 8))
 
     def _build_file_tab(self, parent) -> None:
         parent.grid_columnconfigure(0, weight=1)
@@ -294,6 +342,33 @@ class MdConverterApp:
             self._output_dir = Path(path)
             self.out_entry.delete(0, "end")
             self.out_entry.insert(0, str(self._output_dir))
+            self._persist_output_dir(self._output_dir)
+
+    def _on_open_output(self) -> None:
+        raw = self.out_entry.get().strip()
+        if not raw:
+            messagebox.showwarning("出力先未指定", "出力先フォルダを指定してください。")
+            return
+        target = Path(os.path.expanduser(raw))
+        if not target.exists():
+            if not messagebox.askyesno(
+                "フォルダが存在しません",
+                f"{target}\nはまだ存在しません。作成して開きますか？",
+            ):
+                return
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                messagebox.showerror(
+                    "作成失敗", f"フォルダを作成できませんでした:\n{exc}"
+                )
+                return
+        try:
+            _open_in_file_manager(target)
+        except Exception as exc:  # noqa: BLE001 - surface to user
+            messagebox.showerror(
+                "オープン失敗", f"フォルダを開けませんでした:\n{exc}"
+            )
 
     def _on_start(self) -> None:
         if self.worker is not None and self.worker.is_alive():
@@ -331,6 +406,11 @@ class MdConverterApp:
             )
             return
 
+        # Remember the output dir so the next launch starts here. We save on
+        # start (not just on 参照) to capture edits typed directly into the
+        # entry field.
+        self._persist_output_dir(out_dir)
+
         self._reset_progress()
         self._log_info(f"変換を開始します ({len(sources)} 件)")
         self.worker = ConversionWorker(self.converter, sources, out_dir)
@@ -351,11 +431,15 @@ class MdConverterApp:
         if worker is None:
             return
         drain_events(worker, self._handle_event)
-        if worker.is_alive():
+        # Keep polling as long as EITHER the worker is still running OR the
+        # event queue still has events waiting. A fast backend (e.g. pypdfium2
+        # on a 300-page PDF) can finish its thread while hundreds of progress
+        # / log events are still queued; if we only do one final 64-event
+        # drain and stop polling, the remaining events get stranded and the
+        # GUI freezes mid-run even though conversion is already done.
+        if worker.is_alive() or not worker.events.empty():
             self.root.after(self.POLL_INTERVAL_MS, self._poll_worker)
         else:
-            # Drain any final events that arrived after the last tick.
-            drain_events(worker, self._handle_event)
             self._set_running(False)
             self.worker = None
 
@@ -455,6 +539,10 @@ class MdConverterApp:
 
     # ------------------------------------------------------------- helpers
 
+    def _persist_output_dir(self, path: Path) -> None:
+        self._settings["output_dir"] = str(path)
+        _save_settings(self._settings)
+
     def _set_running(self, running: bool) -> None:
         if running:
             self.start_btn.configure(state="disabled")
@@ -516,6 +604,18 @@ def _shorten(text: str, width: int = 60) -> str:
     if len(text) <= width:
         return text
     return "…" + text[-(width - 1):]
+
+
+def _open_in_file_manager(path: Path) -> None:
+    """Open *path* in the OS file manager (Explorer / Finder / Nautilus)."""
+    if sys.platform.startswith("win"):
+        # os.startfile launches the default shell handler for the path;
+        # for a directory that's Windows Explorer.
+        os.startfile(str(path))  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        subprocess.run(["open", str(path)], check=True)
+    else:
+        subprocess.run(["xdg-open", str(path)], check=True)
 
 
 # ---------------------------------------------------------------------------

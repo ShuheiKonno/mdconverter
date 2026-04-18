@@ -125,6 +125,7 @@ class ConversionWorker(threading.Thread):
                 on_item_start=self._emit_item_started,
                 on_item_done=self._emit_item_done,
                 cancel_event=self.cancel_event,
+                log_cb=self._emit_log,
             )
         except CancelledError:
             self.events.put(Cancelled())
@@ -144,6 +145,9 @@ class ConversionWorker(threading.Thread):
 
     def _emit_file(self, read: int, total: int) -> None:
         self.events.put(FileProgress(bytes_read=read, total=total))
+
+    def _emit_log(self, level: str, text: str) -> None:
+        self.events.put(LogMessage(level=level, text=text))
 
     def _emit_item_started(self, source: str) -> None:
         self.events.put(ItemStarted(source=source))

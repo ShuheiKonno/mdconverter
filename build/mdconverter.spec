@@ -64,6 +64,8 @@ for pkg in (
     "charset_normalizer",
     "pdfminer",
     "pdfminer.six",
+    "pdfplumber",
+    "pypdfium2",
     "mammoth",
     "python_pptx",
     "pptx",

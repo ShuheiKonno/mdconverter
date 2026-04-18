@@ -40,6 +40,11 @@ ByteProgressCallback = Callable[[int, int], None]
 #   total: int — total number of files in this batch
 BatchProgressCallback = Callable[[int, int], None]
 
+# Log callback contract:
+#   level: str — "info", "warning", or "error"
+#   text:  str — human-readable message to surface in the GUI log pane.
+LogCallback = Callable[[str, str], None]
+
 
 # ---------------------------------------------------------------------------
 # Results
@@ -88,6 +93,7 @@ class Converter:
         out_dir: Path,
         progress_cb: Optional[ByteProgressCallback] = None,
         cancel_event: Optional[threading.Event] = None,
+        log_cb: Optional[LogCallback] = None,
     ) -> Path:
         """Convert one local file and write the result as ``<stem>.md``.
 
@@ -107,32 +113,124 @@ class Converter:
         if progress_cb is not None:
             progress_cb(0, size)
 
-        with src.open("rb") as raw:
-            stream = ProgressStream(
-                raw,
-                total_size=size,
-                callback=progress_cb,
-                cancel_event=cancel_event,
+        if src.suffix.lower() == ".pdf":
+            # PDFs get a custom page-by-page extraction so the output has
+            # explicit "## ページ N" section markers. markitdown's built-in
+            # PDF converter flattens pages into a single blob, losing the
+            # only structural signal PDFs reliably carry.
+            text_content = self._convert_pdf_with_pages(
+                src, progress_cb, cancel_event, log_cb
             )
-            result = self._md.convert_stream(
-                stream,
-                file_extension=src.suffix or None,
-                # Embed images as base64 data URIs in the Markdown output.
-                # Without this, markitdown's default behaviour truncates
-                # data: URIs to "data:image/png;base64..." and PPTX pictures
-                # become dangling references like ![](Picture1.jpg), leaving
-                # the reader with broken image links. Enabling this keeps the
-                # .md file self-contained at the cost of a larger payload.
-                keep_data_uris=True,
-            )
+        else:
+            with src.open("rb") as raw:
+                stream = ProgressStream(
+                    raw,
+                    total_size=size,
+                    callback=progress_cb,
+                    cancel_event=cancel_event,
+                )
+                result = self._md.convert_stream(
+                    stream,
+                    file_extension=src.suffix or None,
+                    # We don't keep data URIs: the primary consumer of this
+                    # output is AI tooling (Claude Projects / ChatGPT /
+                    # NotebookLM / RAG pipelines) which either ignores
+                    # data-URI images in Markdown or lets them bloat the
+                    # payload into irrelevant tokens. Any remaining broken
+                    # image references are stripped by
+                    # ``_strip_data_uri_images`` below.
+                    keep_data_uris=False,
+                )
+            text_content = _strip_data_uri_images(result.text_content or "")
 
-        dst.write_text(result.text_content or "", encoding="utf-8")
+        dst.write_text(text_content, encoding="utf-8")
 
         # Ensure the final progress reaches 100% even if markitdown stopped
         # reading before the end of the stream.
         if progress_cb is not None:
             progress_cb(size, size)
         return dst
+
+    # ---------------------------------------------------------------- pdf
+
+    def _convert_pdf_with_pages(
+        self,
+        src: Path,
+        progress_cb: Optional[ByteProgressCallback] = None,
+        cancel_event: Optional[threading.Event] = None,
+        log_cb: Optional[LogCallback] = None,
+    ) -> str:
+        """Extract a PDF page-by-page and emit ``## ページ N`` markers.
+
+        Unlike markitdown's built-in PDF converter, which concatenates all
+        page text into a single flat blob, this keeps page boundaries as
+        Markdown headings so downstream consumers can see the document's
+        only reliable structural signal.
+
+        Uses ``pypdfium2`` (Google PDFium, the engine behind Chrome) because
+        pdfplumber is prone to hanging on complex pages — we previously saw
+        a 311-page PDF stall indefinitely mid-extraction. PDFium is an
+        order of magnitude faster and far more robust on malformed content
+        streams. ``log_cb`` receives per-page progress so the user can tell
+        the process is alive.
+        """
+        # Lazy import: pypdfium2 carries a native library and we only want
+        # to pay the load cost when a PDF is actually converted.
+        import pypdfium2 as pdfium
+
+        size = src.stat().st_size
+
+        with src.open("rb") as raw:
+            # PDFium needs the whole file buffered. PDFs are typically a few
+            # MB — negligible for desktop use. Progress for this phase is
+            # intentionally silent (see Phase 2 for the per-page updates).
+            stream = ProgressStream(
+                raw,
+                total_size=size,
+                callback=None,
+                cancel_event=cancel_event,
+            )
+            data = stream.read()
+
+        chunks: List[str] = []
+        pdf = pdfium.PdfDocument(data)
+        try:
+            total_pages = len(pdf)
+            if log_cb is not None:
+                log_cb(
+                    "info",
+                    f"PDF: {total_pages} ページを解析します ({src.name})",
+                )
+            for i in range(total_pages):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise CancelledError("conversion cancelled by user")
+                if log_cb is not None:
+                    log_cb(
+                        "info",
+                        f"  ページ {i + 1}/{total_pages} を処理中...",
+                    )
+                page = pdf[i]
+                try:
+                    textpage = page.get_textpage()
+                    try:
+                        text = (textpage.get_text_bounded() or "").strip()
+                    finally:
+                        textpage.close()
+                finally:
+                    page.close()
+                if text:
+                    chunks.append(f"## ページ {i + 1}\n\n{text}\n")
+                else:
+                    # Keep page numbering contiguous even for empty pages.
+                    chunks.append(f"## ページ {i + 1}\n\n")
+                if progress_cb is not None and total_pages > 0:
+                    progress_cb(int(size * (i + 1) / total_pages), size)
+        finally:
+            pdf.close()
+
+        if log_cb is not None:
+            log_cb("info", f"PDF: 全 {total_pages} ページ解析完了")
+        return "\n".join(chunks).rstrip() + "\n"
 
     # ---------------------------------------------------------------- uri
 
@@ -153,13 +251,16 @@ class Converter:
         if cancel_event is not None and cancel_event.is_set():
             raise CancelledError("conversion cancelled by user")
 
-        result = self._md.convert_uri(uri, keep_data_uris=True)
+        result = self._md.convert_uri(uri, keep_data_uris=False)
 
         if cancel_event is not None and cancel_event.is_set():
             raise CancelledError("conversion cancelled by user")
 
         dst = _unique_path(out_dir / (_slug_from_uri(uri) + ".md"))
-        dst.write_text(result.text_content or "", encoding="utf-8")
+        dst.write_text(
+            _strip_data_uri_images(result.text_content or ""),
+            encoding="utf-8",
+        )
 
         if progress_cb is not None:
             progress_cb(1, 1)
@@ -176,6 +277,7 @@ class Converter:
         on_item_start: Optional[Callable[[str], None]] = None,
         on_item_done: Optional[Callable[[ConversionItemResult], None]] = None,
         cancel_event: Optional[threading.Event] = None,
+        log_cb: Optional[LogCallback] = None,
     ) -> BatchResult:
         """Convert a mixed list of files, directories and URLs.
 
@@ -206,7 +308,11 @@ class Converter:
                     )
                 else:
                     dst = self.convert_file(
-                        Path(item), out_dir, file_cb, cancel_event
+                        Path(item),
+                        out_dir,
+                        file_cb,
+                        cancel_event,
+                        log_cb,
                     )
                 result = ConversionItemResult(
                     source=label, destination=dst, success=True
@@ -237,6 +343,24 @@ class Converter:
 
 
 _URI_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://")
+
+# Matches Markdown image references that embed data URIs, whether the URI is
+# the full base64 payload or the truncated placeholder markitdown produces
+# with ``keep_data_uris=False`` (e.g. ``data:image/png;base64...``). These
+# references are useless to the AI-service consumers this tool targets —
+# Claude / ChatGPT / NotebookLM ignore them, and RAG pipelines waste tokens
+# on them — so we strip them out entirely.
+_DATA_URI_IMG_RE = re.compile(r"!\[[^\]]*\]\(\s*data:[^)]*\)")
+# Collapse 3+ consecutive blank lines left behind by the stripping, keeping
+# the output tidy without disturbing legitimate paragraph breaks.
+_EXTRA_BLANKS_RE = re.compile(r"\n{3,}")
+
+
+def _strip_data_uri_images(text: str) -> str:
+    if not text:
+        return text
+    stripped = _DATA_URI_IMG_RE.sub("", text)
+    return _EXTRA_BLANKS_RE.sub("\n\n", stripped)
 
 
 def _is_uri(value: Union[str, Path]) -> bool:
