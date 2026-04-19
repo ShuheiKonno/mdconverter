@@ -15,6 +15,7 @@ the GUI is responsible for marshalling them back to the Tk main loop.
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import re
@@ -94,6 +95,7 @@ class Converter:
         progress_cb: Optional[ByteProgressCallback] = None,
         cancel_event: Optional[threading.Event] = None,
         log_cb: Optional[LogCallback] = None,
+        save_images: bool = False,
     ) -> Path:
         """Convert one local file and write the result as ``<stem>.md``.
 
@@ -113,13 +115,19 @@ class Converter:
         if progress_cb is not None:
             progress_cb(0, size)
 
+        images_stem = dst.stem + "_images"
+        images_dir = out_dir / images_stem
+
         if src.suffix.lower() == ".pdf":
             # PDFs get a custom page-by-page extraction so the output has
             # explicit "## ページ N" section markers. markitdown's built-in
             # PDF converter flattens pages into a single blob, losing the
             # only structural signal PDFs reliably carry.
             text_content = self._convert_pdf_with_pages(
-                src, progress_cb, cancel_event, log_cb
+                src, progress_cb, cancel_event, log_cb,
+                save_images=save_images,
+                images_dir=images_dir,
+                images_stem=images_stem,
             )
         else:
             with src.open("rb") as raw:
@@ -132,16 +140,16 @@ class Converter:
                 result = self._md.convert_stream(
                     stream,
                     file_extension=src.suffix or None,
-                    # We don't keep data URIs: the primary consumer of this
-                    # output is AI tooling (Claude Projects / ChatGPT /
-                    # NotebookLM / RAG pipelines) which either ignores
-                    # data-URI images in Markdown or lets them bloat the
-                    # payload into irrelevant tokens. Any remaining broken
-                    # image references are stripped by
-                    # ``_strip_image_references`` below.
-                    keep_data_uris=False,
+                    keep_data_uris=save_images,
                 )
-            text_content = _strip_image_references(result.text_content or "")
+            if save_images:
+                text_content = _save_images_to_folder(
+                    result.text_content or "",
+                    images_dir,
+                    images_stem,
+                )
+            else:
+                text_content = _strip_image_references(result.text_content or "")
 
         dst.write_text(text_content, encoding="utf-8")
 
@@ -159,6 +167,9 @@ class Converter:
         progress_cb: Optional[ByteProgressCallback] = None,
         cancel_event: Optional[threading.Event] = None,
         log_cb: Optional[LogCallback] = None,
+        save_images: bool = False,
+        images_dir: Optional[Path] = None,
+        images_stem: Optional[str] = None,
     ) -> str:
         """Extract a PDF page-by-page and emit ``## ページ N`` markers.
 
@@ -177,6 +188,8 @@ class Converter:
         # Lazy import: pypdfium2 carries a native library and we only want
         # to pay the load cost when a PDF is actually converted.
         import pypdfium2 as pdfium
+        import pypdfium2.raw as pdfium_c
+        from io import BytesIO
 
         size = src.stat().st_size
 
@@ -193,6 +206,7 @@ class Converter:
             data = stream.read()
 
         chunks: List[str] = []
+        img_counter = 0
         pdf = pdfium.PdfDocument(data)
         try:
             total_pages = len(pdf)
@@ -216,13 +230,33 @@ class Converter:
                         text = (textpage.get_text_bounded() or "").strip()
                     finally:
                         textpage.close()
+
+                    img_refs: List[str] = []
+                    if save_images and images_dir is not None and images_stem is not None:
+                        for obj in page.get_objects(
+                            filter=[pdfium_c.FPDF_PAGEOBJ_IMAGE]
+                        ):
+                            buf = BytesIO()
+                            try:
+                                obj.extract(buf, fb_format="png")
+                                raw = buf.getvalue()
+                                # JPEG は fb_format に関わらずそのまま返るため
+                                # マジックバイトで実際のフォーマットを判定する
+                                ext = "jpg" if raw[:3] == b"\xff\xd8\xff" else "png"
+                                img_counter += 1
+                                filename = f"image{img_counter:03d}.{ext}"
+                                images_dir.mkdir(parents=True, exist_ok=True)
+                                (images_dir / filename).write_bytes(raw)
+                                img_refs.append(f"![]({images_stem}/{filename})")
+                            except Exception:
+                                pass
                 finally:
                     page.close()
-                if text:
-                    chunks.append(f"## ページ {i + 1}\n\n{text}\n")
-                else:
-                    # Keep page numbering contiguous even for empty pages.
-                    chunks.append(f"## ページ {i + 1}\n\n")
+
+                page_chunk = f"## ページ {i + 1}\n\n{text}\n" if text else f"## ページ {i + 1}\n\n"
+                if img_refs:
+                    page_chunk = page_chunk.rstrip("\n") + "\n\n" + "\n".join(img_refs) + "\n"
+                chunks.append(page_chunk)
                 if progress_cb is not None and total_pages > 0:
                     progress_cb(int(size * (i + 1) / total_pages), size)
         finally:
@@ -278,6 +312,7 @@ class Converter:
         on_item_done: Optional[Callable[[ConversionItemResult], None]] = None,
         cancel_event: Optional[threading.Event] = None,
         log_cb: Optional[LogCallback] = None,
+        save_images: bool = False,
     ) -> BatchResult:
         """Convert a mixed list of files, directories and URLs.
 
@@ -313,6 +348,7 @@ class Converter:
                         file_cb,
                         cancel_event,
                         log_cb,
+                        save_images=save_images,
                     )
                 result = ConversionItemResult(
                     source=label, destination=dst, success=True
@@ -364,6 +400,46 @@ _FILE_IMG_RE = re.compile(
 # Collapse 3+ consecutive blank lines left behind by the stripping, keeping
 # the output tidy without disturbing legitimate paragraph breaks.
 _EXTRA_BLANKS_RE = re.compile(r"\n{3,}")
+
+
+_EXTRACT_DATA_URI_RE = re.compile(
+    r"!\[([^\]]*)\]\(\s*data:([^;]+);base64,([A-Za-z0-9+/=\s]+)\)",
+    re.DOTALL,
+)
+_MIME_TO_EXT: dict = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "image/svg+xml": "svg",
+    "image/bmp": "bmp",
+}
+
+
+def _save_images_to_folder(text: str, images_dir: Path, rel_prefix: str) -> str:
+    """data URI 画像をファイルとして保存し、相対パス参照に置換する。"""
+    if not text:
+        return text
+    counter = 0
+
+    def replacer(m: re.Match) -> str:
+        nonlocal counter
+        alt, mime, data_b64 = m.group(1), m.group(2), m.group(3)
+        ext = _MIME_TO_EXT.get(mime.strip().lower(), "bin")
+        counter += 1
+        filename = f"image{counter:03d}.{ext}"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            (images_dir / filename).write_bytes(base64.b64decode(data_b64))
+        except Exception:
+            return ""
+        return f"![{alt}]({rel_prefix}/{filename})"
+
+    # 先にファイル参照プレースホルダ（Picture1.jpg等）を除去してから
+    # data URI を置換する（逆順にすると新しい相対パス参照まで除去される）
+    cleaned = _FILE_IMG_RE.sub("", text)
+    result = _EXTRACT_DATA_URI_RE.sub(replacer, cleaned)
+    return _EXTRA_BLANKS_RE.sub("\n\n", result)
 
 
 def _strip_image_references(text: str) -> str:

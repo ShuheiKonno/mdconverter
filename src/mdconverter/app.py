@@ -126,6 +126,7 @@ class MdConverterApp:
             self._output_dir: Path = Path(saved_output)
         else:
             self._output_dir = Path.home() / "mdconverter_output"
+        self._save_images: bool = bool(self._settings.get("save_images", False))
 
         self._build_ui()
         self._register_drop_targets()
@@ -165,6 +166,14 @@ class MdConverterApp:
         ctk.CTkButton(
             out_frame, text="開く", width=80, command=self._on_open_output
         ).grid(row=0, column=3, padx=(0, 12), pady=10)
+
+        self._save_images_var = ctk.BooleanVar(value=self._save_images)
+        ctk.CTkCheckBox(
+            out_frame,
+            text="画像をフォルダに保存（相対パス参照）",
+            variable=self._save_images_var,
+            command=self._on_save_images_toggle,
+        ).grid(row=1, column=0, columnspan=4, sticky="w", padx=12, pady=(0, 10))
 
         # --- Buttons -----------------------------------------------------
         btn_frame = ctk.CTkFrame(root, fg_color="transparent")
@@ -427,7 +436,10 @@ class MdConverterApp:
 
         self._reset_progress()
         self._log_info(f"変換を開始します ({len(sources)} 件)")
-        self.worker = ConversionWorker(self.converter, sources, out_dir)
+        self.worker = ConversionWorker(
+            self.converter, sources, out_dir,
+            save_images=self._save_images,
+        )
         self.worker.start()
         self._set_running(True)
         self.root.after(self.POLL_INTERVAL_MS, self._poll_worker)
@@ -555,6 +567,11 @@ class MdConverterApp:
 
     def _persist_output_dir(self, path: Path) -> None:
         self._settings["output_dir"] = str(path)
+        _save_settings(self._settings)
+
+    def _on_save_images_toggle(self) -> None:
+        self._save_images = self._save_images_var.get()
+        self._settings["save_images"] = self._save_images
         _save_settings(self._settings)
 
     def _set_running(self, running: bool) -> None:

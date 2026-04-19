@@ -100,11 +100,13 @@ class ConversionWorker(threading.Thread):
         converter: Converter,
         sources: Sequence[Union[str, Path]],
         out_dir: Path,
+        save_images: bool = False,
     ) -> None:
         super().__init__(daemon=True, name="mdconverter-worker")
         self._converter = converter
         self._sources = list(sources)
         self._out_dir = Path(out_dir)
+        self._save_images = save_images
         self.events: "queue.Queue[WorkerEvent]" = queue.Queue()
         self.cancel_event = threading.Event()
 
@@ -126,6 +128,7 @@ class ConversionWorker(threading.Thread):
                 on_item_done=self._emit_item_done,
                 cancel_event=self.cancel_event,
                 log_cb=self._emit_log,
+                save_images=self._save_images,
             )
         except CancelledError:
             self.events.put(Cancelled())
