@@ -128,6 +128,7 @@ class MdConverterApp:
         else:
             self._output_dir = Path.home() / "mdconverter_output"
         self._save_images: bool = bool(self._settings.get("save_images", False))
+        self._extract_tables: bool = bool(self._settings.get("extract_tables", False))
 
         self._build_ui()
         self._register_drop_targets()
@@ -174,7 +175,15 @@ class MdConverterApp:
             text="画像をフォルダに保存（相対パス参照）",
             variable=self._save_images_var,
             command=self._on_save_images_toggle,
-        ).grid(row=1, column=0, columnspan=4, sticky="w", padx=12, pady=(0, 10))
+        ).grid(row=1, column=0, columnspan=4, sticky="w", padx=12, pady=(0, 4))
+
+        self._extract_tables_var = ctk.BooleanVar(value=self._extract_tables)
+        ctk.CTkCheckBox(
+            out_frame,
+            text="PDFの表をMarkdown表として抽出（実験的・低速）",
+            variable=self._extract_tables_var,
+            command=self._on_extract_tables_toggle,
+        ).grid(row=2, column=0, columnspan=4, sticky="w", padx=12, pady=(0, 10))
 
         # --- Buttons -----------------------------------------------------
         btn_frame = ctk.CTkFrame(root, fg_color="transparent")
@@ -440,6 +449,7 @@ class MdConverterApp:
         self.worker = ConversionWorker(
             self.converter, sources, out_dir,
             save_images=self._save_images,
+            extract_tables=self._extract_tables,
         )
         self.worker.start()
         self._set_running(True)
@@ -573,6 +583,11 @@ class MdConverterApp:
     def _on_save_images_toggle(self) -> None:
         self._save_images = self._save_images_var.get()
         self._settings["save_images"] = self._save_images
+        _save_settings(self._settings)
+
+    def _on_extract_tables_toggle(self) -> None:
+        self._extract_tables = self._extract_tables_var.get()
+        self._settings["extract_tables"] = self._extract_tables
         _save_settings(self._settings)
 
     def _set_running(self, running: bool) -> None:

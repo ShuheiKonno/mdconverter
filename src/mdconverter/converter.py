@@ -96,6 +96,7 @@ class Converter:
         cancel_event: Optional[threading.Event] = None,
         log_cb: Optional[LogCallback] = None,
         save_images: bool = False,
+        extract_tables: bool = False,
     ) -> Path:
         """Convert one local file and write the result as ``<stem>.md``.
 
@@ -128,6 +129,7 @@ class Converter:
                 save_images=save_images,
                 images_dir=images_dir,
                 images_stem=images_stem,
+                extract_tables=extract_tables,
             )
         else:
             with src.open("rb") as raw:
@@ -170,6 +172,7 @@ class Converter:
         save_images: bool = False,
         images_dir: Optional[Path] = None,
         images_stem: Optional[str] = None,
+        extract_tables: bool = False,
     ) -> str:
         """Extract a PDF page-by-page and emit ``## ページ N`` markers.
 
@@ -184,6 +187,11 @@ class Converter:
         order of magnitude faster and far more robust on malformed content
         streams. ``log_cb`` receives per-page progress so the user can tell
         the process is alive.
+
+        When ``extract_tables=True`` (opt-in), each page is also processed
+        with pdfplumber to detect tables and emit them as Markdown tables.
+        Per-page failures fall back to the pypdfium2 text path so a single
+        problematic page can't take the whole document down.
         """
         # Lazy import: pypdfium2 carries a native library and we only want
         # to pay the load cost when a PDF is actually converted.
@@ -205,16 +213,29 @@ class Converter:
             )
             data = stream.read()
 
+        plumber_pdf = None
+        if extract_tables:
+            try:
+                import pdfplumber
+                plumber_pdf = pdfplumber.open(BytesIO(data))
+            except Exception as exc:  # noqa: BLE001
+                if log_cb is not None:
+                    log_cb(
+                        "warning",
+                        f"PDF: 表抽出の初期化に失敗 ({exc}) — 通常テキスト抽出のみ実行します",
+                    )
+                plumber_pdf = None
+
         chunks: List[str] = []
         img_counter = 0
         pdf = pdfium.PdfDocument(data)
         try:
             total_pages = len(pdf)
             if log_cb is not None:
-                log_cb(
-                    "info",
-                    f"PDF: {total_pages} ページを解析します ({src.name})",
-                )
+                msg = f"PDF: {total_pages} ページを解析します ({src.name})"
+                if plumber_pdf is not None:
+                    msg += " [表抽出モード]"
+                log_cb("info", msg)
             for i in range(total_pages):
                 if cancel_event is not None and cancel_event.is_set():
                     raise CancelledError("conversion cancelled by user")
@@ -223,13 +244,37 @@ class Converter:
                         "info",
                         f"  ページ {i + 1}/{total_pages} を処理中...",
                     )
+
+                table_md_blocks: List[str] = []
+                exclude_text_via_tables = False
+                if plumber_pdf is not None:
+                    try:
+                        text_outside, table_md_blocks = _extract_page_text_and_tables(
+                            plumber_pdf, i
+                        )
+                        exclude_text_via_tables = True
+                    except Exception as exc:  # noqa: BLE001
+                        if log_cb is not None:
+                            log_cb(
+                                "warning",
+                                f"  ページ {i + 1}: 表抽出失敗 ({exc}) — テキスト抽出にフォールバック",
+                            )
+                        text_outside = ""
+                        table_md_blocks = []
+                        exclude_text_via_tables = False
+
                 page = pdf[i]
                 try:
-                    textpage = page.get_textpage()
-                    try:
-                        text = (textpage.get_text_bounded() or "").strip()
-                    finally:
-                        textpage.close()
+                    if exclude_text_via_tables:
+                        # pdfplumber でテキスト抽出済みのため、pypdfium2 の
+                        # textpage 呼び出しは省略する
+                        text = (text_outside or "").strip()
+                    else:
+                        textpage = page.get_textpage()
+                        try:
+                            text = (textpage.get_text_bounded() or "").strip()
+                        finally:
+                            textpage.close()
 
                     img_refs: List[str] = []
                     if save_images and images_dir is not None and images_stem is not None:
@@ -254,6 +299,13 @@ class Converter:
                     page.close()
 
                 page_chunk = f"## ページ {i + 1}\n\n{text}\n" if text else f"## ページ {i + 1}\n\n"
+                if table_md_blocks:
+                    page_chunk = (
+                        page_chunk.rstrip("\n")
+                        + "\n\n"
+                        + "\n\n".join(table_md_blocks)
+                        + "\n"
+                    )
                 if img_refs:
                     page_chunk = page_chunk.rstrip("\n") + "\n\n" + "\n".join(img_refs) + "\n"
                 chunks.append(page_chunk)
@@ -261,6 +313,11 @@ class Converter:
                     progress_cb(int(size * (i + 1) / total_pages), size)
         finally:
             pdf.close()
+            if plumber_pdf is not None:
+                try:
+                    plumber_pdf.close()
+                except Exception:
+                    pass
 
         if log_cb is not None:
             log_cb("info", f"PDF: 全 {total_pages} ページ解析完了")
@@ -313,6 +370,7 @@ class Converter:
         cancel_event: Optional[threading.Event] = None,
         log_cb: Optional[LogCallback] = None,
         save_images: bool = False,
+        extract_tables: bool = False,
     ) -> BatchResult:
         """Convert a mixed list of files, directories and URLs.
 
@@ -349,6 +407,7 @@ class Converter:
                         cancel_event,
                         log_cb,
                         save_images=save_images,
+                        extract_tables=extract_tables,
                     )
                 result = ConversionItemResult(
                     source=label, destination=dst, success=True
@@ -510,3 +569,107 @@ def _unique_path(path: Path) -> Path:
         if not candidate.exists():
             return candidate
         i += 1
+
+
+# ---------------------------------------------------------------------------
+# pdfplumber-based table extraction (opt-in)
+
+
+def _extract_page_text_and_tables(plumber_pdf, index: int):
+    """Run pdfplumber on one page and return ``(text_outside_tables, table_md_blocks)``.
+
+    Tables are returned as Markdown strings ordered by their top-Y (reading
+    order). Text inside table bounding boxes is excluded from the returned
+    text so the same content is not emitted twice.
+    """
+    page = plumber_pdf.pages[index]
+    tables = page.find_tables() or []
+
+    if not tables:
+        text = page.extract_text() or ""
+        return text, []
+
+    # bbox は (x0, top, x1, bottom)
+    table_bboxes = [tuple(t.bbox) for t in tables]
+
+    def _outside_all_tables(obj) -> bool:
+        # 文字オブジェクトの中心座標で判定する。中心が表 bbox に入る文字は
+        # 表セル経由で別途出力されるため、本文からは除く。
+        try:
+            cx = (obj["x0"] + obj["x1"]) / 2
+            cy = (obj["top"] + obj["bottom"]) / 2
+        except (KeyError, TypeError):
+            return True
+        for x0, top, x1, bottom in table_bboxes:
+            if x0 <= cx <= x1 and top <= cy <= bottom:
+                return False
+        return True
+
+    try:
+        filtered = page.filter(_outside_all_tables)
+        text_outside = filtered.extract_text() or ""
+    except Exception:
+        # filter がうまく動かない PDF があれば全文を残す
+        text_outside = page.extract_text() or ""
+
+    # 上から下の読み順で並べる
+    sorted_tables = sorted(tables, key=lambda t: t.bbox[1])
+    table_md_blocks: List[str] = []
+    for t in sorted_tables:
+        try:
+            rows = t.extract()
+        except Exception:
+            continue
+        md = _format_markdown_table(rows)
+        if md:
+            table_md_blocks.append(md)
+
+    return text_outside, table_md_blocks
+
+
+def _format_markdown_table(rows) -> str:
+    """Convert a 2D list of cells (from pdfplumber ``Table.extract``) to Markdown.
+
+    The first row is used as the header; if the table only has one row it is
+    still rendered with that row as the header. ``None`` cells become empty,
+    pipe characters are escaped, and embedded newlines become ``<br>``.
+    """
+    if not rows:
+        return ""
+
+    cleaned: List[List[str]] = []
+    for row in rows:
+        if row is None:
+            continue
+        cleaned.append([_format_table_cell(c) for c in row])
+
+    cleaned = [r for r in cleaned if any(cell.strip() for cell in r)]
+    if not cleaned:
+        return ""
+
+    n_cols = max(len(r) for r in cleaned)
+    if n_cols == 0:
+        return ""
+    for r in cleaned:
+        if len(r) < n_cols:
+            r.extend([""] * (n_cols - len(r)))
+
+    header = cleaned[0]
+    body = cleaned[1:]
+
+    lines = []
+    lines.append("| " + " | ".join(header) + " |")
+    lines.append("| " + " | ".join(["---"] * n_cols) + " |")
+    for r in body:
+        lines.append("| " + " | ".join(r) + " |")
+    return "\n".join(lines)
+
+
+def _format_table_cell(cell) -> str:
+    if cell is None:
+        return ""
+    # 改行を <br> に変換する前に strip する。後でやると先頭/末尾の改行が
+    # `<br>` になって取り除けない。
+    text = str(cell).replace("\r\n", "\n").replace("\r", "\n").strip()
+    text = text.replace("|", r"\|").replace("\n", "<br>")
+    return text

@@ -55,5 +55,6 @@ markdownconverter のメインパッケージ。`microsoft/markitdown` をラッ
 - 変換は **スレッド** ベース（`threading.Thread` + `threading.Event`）。`multiprocessing.freeze_support` や pickling 制約は関係しない
 - PyInstaller でバンドルする際は `build/mdconverter.spec` が `collect_all("markitdown")` と多数の optional 依存を拾っている。依存追加時は spec の `hiddenimports` 側にも載せる必要があるケースが多い
 - `__main__.py` は PyInstaller で絶対 import（`from mdconverter.app import launch`）である必要がある（相対 import だとバンドル後にクラッシュする — コミット `18cdd2e` 参照）
+- **PDF 表抽出は opt-in**（`extract_tables=True`）。`Converter._convert_pdf_with_pages` 内で `pdfplumber` を追加で開き、表 bbox を使って本文と表を分離。ページ単位の `try/except` で失敗時は pypdfium2 のテキスト抽出にフォールバック。デフォルト OFF
 
 <!-- MANUAL: -->
