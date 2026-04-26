@@ -528,6 +528,12 @@ _TABLE_NAN_CELL_RE = re.compile(r"(?<=\|)\s*NaN\s*(?=\|)")
 # Blank Markdown table row: only pipes and whitespace, e.g. `|  |  |  |`.
 # Requires 2+ pipes so a stray single `|` line cannot match.
 _BLANK_TABLE_ROW_RE = re.compile(r"^\s*\|(?:\s*\|)+\s*$")
+# A row whose first cell is just digits (a row index / sequence number)
+# and all remaining cells are blank, e.g. ``| 64 |  |  |  |``. Excel sheets
+# routinely include a leading "No." column that the user does not consider
+# real data, so such rows participate in the blank-row collapse below.
+# Strict: signed/decimal/text first-column values do NOT match.
+_INDEX_ONLY_TABLE_ROW_RE = re.compile(r"^\s*\|\s*\d+\s*\|(?:\s*\|)+\s*$")
 
 
 def _compress_table_blanks(text: str) -> str:
@@ -541,7 +547,10 @@ def _compress_table_blanks(text: str) -> str:
     The transform is two-step:
       1. Replace any cell whose entire content is ``NaN`` with an empty cell.
       2. Walk lines and keep only the first row of each consecutive blank-row
-         run.
+         run. A row counts as blank when *every* cell is whitespace, OR when
+         the first cell is just an integer (a row index / sequence number)
+         and all remaining cells are whitespace — Excel "No." columns alone
+         do not make a row meaningful.
 
     The header separator ``| --- | --- |`` is preserved (contains ``---``,
     not whitespace). A cell containing a substring like ``Total: NaN`` is
@@ -551,8 +560,11 @@ def _compress_table_blanks(text: str) -> str:
        This is a destructive transform: a cell whose entire value is
        literally the string ``NaN`` (e.g. scientific data, lab results) is
        indistinguishable from a pandas-emitted blank in the rendered
-       Markdown and will also be cleared. The feature is therefore opt-in
-       (default ``False``); callers must explicitly request it.
+       Markdown and will also be cleared. Likewise, rows whose only data is
+       a single integer in the first column are collapsed regardless of
+       whether the integer is a row index or a real measurement. The
+       feature is therefore opt-in (default ``False``); callers must
+       explicitly request it.
     """
     if not text:
         return text
@@ -561,7 +573,10 @@ def _compress_table_blanks(text: str) -> str:
     out: List[str] = []
     in_blank_run = False
     for line in lines:
-        if _BLANK_TABLE_ROW_RE.match(line):
+        if (
+            _BLANK_TABLE_ROW_RE.match(line)
+            or _INDEX_ONLY_TABLE_ROW_RE.match(line)
+        ):
             if in_blank_run:
                 continue
             in_blank_run = True

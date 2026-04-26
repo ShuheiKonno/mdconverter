@@ -114,11 +114,17 @@ class MdConverterApp:
 
         self.root = _DnDCTk()
         self.root.title(f"mdconverter v{__version__} - Markdown Converter")
-        self.root.geometry("820x640")
-        self.root.minsize(720, 540)
+        self.root.geometry("820x500")
+        self.root.minsize(720, 440)
 
         self.converter = Converter()
         self.worker: Optional[ConversionWorker] = None
+
+        # Log lines accumulate in this buffer regardless of whether the log
+        # window is open. The window, when present, mirrors the buffer.
+        self._log_buffer: List[str] = []
+        self._log_window: Optional[ctk.CTkToplevel] = None
+        self._log_textbox: Optional[ctk.CTkTextbox] = None
 
         self._sources: List[str] = []
         self._settings = _load_settings()
@@ -143,7 +149,9 @@ class MdConverterApp:
     def _build_ui(self) -> None:
         root = self.root
         root.grid_columnconfigure(0, weight=1)
-        root.grid_rowconfigure(5, weight=1)
+        # No log textbox lives in the main window anymore — let the file/folder
+        # tab take any extra vertical space when the user enlarges the window.
+        root.grid_rowconfigure(0, weight=1)
 
         # --- Tabs --------------------------------------------------------
         self.tabs = ctk.CTkTabview(root, height=170)
@@ -201,7 +209,7 @@ class MdConverterApp:
         # --- Buttons -----------------------------------------------------
         btn_frame = ctk.CTkFrame(root, fg_color="transparent")
         btn_frame.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 6))
-        btn_frame.grid_columnconfigure(2, weight=1)
+        btn_frame.grid_columnconfigure(3, weight=1)
 
         self.start_btn = ctk.CTkButton(
             btn_frame, text="変換開始", width=140, command=self._on_start
@@ -218,8 +226,16 @@ class MdConverterApp:
         )
         self.cancel_btn.grid(row=0, column=1, padx=(0, 8))
 
+        self.log_btn = ctk.CTkButton(
+            btn_frame,
+            text="ログ表示",
+            width=100,
+            command=self._on_open_log,
+        )
+        self.log_btn.grid(row=0, column=2, padx=(0, 8))
+
         self.status_label = ctk.CTkLabel(btn_frame, text="待機中", anchor="w")
-        self.status_label.grid(row=0, column=2, sticky="ew", padx=(8, 0))
+        self.status_label.grid(row=0, column=3, sticky="ew", padx=(8, 0))
 
         # --- Progress ----------------------------------------------------
         prog_frame = ctk.CTkFrame(root)
@@ -244,14 +260,6 @@ class MdConverterApp:
         self.file_label = ctk.CTkLabel(prog_frame, text="-", width=120)
         self.file_label.grid(row=1, column=2, padx=(6, 12), pady=(4, 10))
 
-        # --- Log ---------------------------------------------------------
-        ctk.CTkLabel(root, text="ログ:", anchor="w").grid(
-            row=4, column=0, sticky="w", padx=16, pady=(6, 0)
-        )
-        self.log_box = ctk.CTkTextbox(root, height=160)
-        self.log_box.grid(row=5, column=0, sticky="nsew", padx=12, pady=(0, 4))
-        self.log_box.configure(state="disabled")
-
         # --- Version footer ---------------------------------------------
         ctk.CTkLabel(
             root,
@@ -259,7 +267,7 @@ class MdConverterApp:
             anchor="e",
             text_color=("gray50", "gray60"),
             font=ctk.CTkFont(size=10),
-        ).grid(row=6, column=0, sticky="e", padx=14, pady=(0, 8))
+        ).grid(row=4, column=0, sticky="e", padx=14, pady=(8, 8))
 
     def _build_file_tab(self, parent) -> None:
         parent.grid_columnconfigure(0, weight=1)
@@ -632,10 +640,25 @@ class MdConverterApp:
         self.source_box.configure(state="disabled")
 
     def _log(self, tag: str, text: str) -> None:
-        self.log_box.configure(state="normal")
-        self.log_box.insert("end", f"[{tag}] {text}\n")
-        self.log_box.see("end")
-        self.log_box.configure(state="disabled")
+        line = f"[{tag}] {text}"
+        self._log_buffer.append(line)
+        # Mirror to the open log window if the user has it visible.
+        box = self._log_textbox
+        win = self._log_window
+        if box is not None and win is not None:
+            try:
+                if not win.winfo_exists():
+                    self._log_window = None
+                    self._log_textbox = None
+                else:
+                    box.configure(state="normal")
+                    box.insert("end", line + "\n")
+                    box.see("end")
+                    box.configure(state="disabled")
+            except Exception:
+                # Window torn down between checks — drop the live mirror.
+                self._log_window = None
+                self._log_textbox = None
 
     def _log_info(self, text: str) -> None:
         self._log("INFO", text)
@@ -645,6 +668,46 @@ class MdConverterApp:
 
     def _log_error(self, text: str) -> None:
         self._log("ERROR", text)
+
+    def _on_open_log(self) -> None:
+        # Re-focus the existing window instead of stacking duplicates.
+        if self._log_window is not None:
+            try:
+                if self._log_window.winfo_exists():
+                    self._log_window.lift()
+                    self._log_window.focus_force()
+                    return
+            except Exception:
+                pass
+            self._log_window = None
+            self._log_textbox = None
+
+        win = ctk.CTkToplevel(self.root)
+        win.title(f"ログ - mdconverter v{__version__}")
+        win.geometry("760x420")
+        win.minsize(480, 240)
+
+        box = ctk.CTkTextbox(win, wrap="word")
+        box.pack(fill="both", expand=True, padx=8, pady=8)
+
+        box.configure(state="normal")
+        if self._log_buffer:
+            box.insert("end", "\n".join(self._log_buffer) + "\n")
+        box.see("end")
+        box.configure(state="disabled")
+
+        self._log_window = win
+        self._log_textbox = box
+
+        def _on_close() -> None:
+            self._log_window = None
+            self._log_textbox = None
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+        win.protocol("WM_DELETE_WINDOW", _on_close)
 
     # ------------------------------------------------------------------ run
 
