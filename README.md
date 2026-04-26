@@ -1,6 +1,6 @@
 # mdconverter
 
-**バージョン**: 0.3.0
+**バージョン**: 0.4.0
 
 ローカルで動くシンプルな Markdown 変換ソフトです。
 [microsoft/markitdown](https://github.com/microsoft/markitdown) をコアに、
@@ -153,7 +153,7 @@ mdconverter/
 
 ## 更新履歴
 
-### 未リリース
+### v0.4.0 (2026-04-26)
 
 - **PDF の表抽出オプション** — 「PDFの表をMarkdown表として抽出」チェック
   ボックスを追加（デフォルト OFF）。`pdfplumber` で PDF 内の表を検出し、

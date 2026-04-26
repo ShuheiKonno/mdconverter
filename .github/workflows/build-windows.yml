@@ -5,7 +5,12 @@ on:
     branches:
       - claude/markdown-converter-tool-cyOzw
       - main
+    tags:
+      - "v*"
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 concurrency:
   group: build-windows-${{ github.ref }}
@@ -52,3 +57,14 @@ jobs:
           path: mdconverter.exe
           retention-days: 90
           if-no-files-found: error
+
+      # タグ push (v*) のときだけ GitHub Release を作成して .exe を添付する。
+      # 通常のブランチ push では artifact のみで release は作らない。
+      - name: Create GitHub Release and attach .exe
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: mdconverter.exe
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
