@@ -102,6 +102,7 @@ class ConversionWorker(threading.Thread):
         out_dir: Path,
         save_images: bool = False,
         extract_tables: bool = False,
+        compress_table_blanks: bool = False,
     ) -> None:
         super().__init__(daemon=True, name="mdconverter-worker")
         self._converter = converter
@@ -109,6 +110,7 @@ class ConversionWorker(threading.Thread):
         self._out_dir = Path(out_dir)
         self._save_images = save_images
         self._extract_tables = extract_tables
+        self._compress_table_blanks = compress_table_blanks
         self.events: "queue.Queue[WorkerEvent]" = queue.Queue()
         self.cancel_event = threading.Event()
 
@@ -132,6 +134,7 @@ class ConversionWorker(threading.Thread):
                 log_cb=self._emit_log,
                 save_images=self._save_images,
                 extract_tables=self._extract_tables,
+                compress_table_blanks=self._compress_table_blanks,
             )
         except CancelledError:
             self.events.put(Cancelled())

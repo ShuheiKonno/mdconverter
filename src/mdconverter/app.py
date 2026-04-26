@@ -129,6 +129,9 @@ class MdConverterApp:
             self._output_dir = Path.home() / "mdconverter_output"
         self._save_images: bool = bool(self._settings.get("save_images", False))
         self._extract_tables: bool = bool(self._settings.get("extract_tables", False))
+        self._compress_table_blanks: bool = bool(
+            self._settings.get("compress_table_blanks", False)
+        )
 
         self._build_ui()
         self._register_drop_targets()
@@ -143,7 +146,7 @@ class MdConverterApp:
         root.grid_rowconfigure(5, weight=1)
 
         # --- Tabs --------------------------------------------------------
-        self.tabs = ctk.CTkTabview(root, height=230)
+        self.tabs = ctk.CTkTabview(root, height=170)
         self.tabs.grid(row=0, column=0, sticky="nsew", padx=12, pady=(12, 6))
         self.tabs.add("ファイル / フォルダ")
         self.tabs.add("URL / YouTube")
@@ -183,7 +186,17 @@ class MdConverterApp:
             text="PDFの表をMarkdown表として抽出（実験的・低速）",
             variable=self._extract_tables_var,
             command=self._on_extract_tables_toggle,
-        ).grid(row=2, column=0, columnspan=4, sticky="w", padx=12, pady=(0, 10))
+        ).grid(row=2, column=0, columnspan=4, sticky="w", padx=12, pady=(0, 4))
+
+        self._compress_table_blanks_var = ctk.BooleanVar(
+            value=self._compress_table_blanks
+        )
+        ctk.CTkCheckBox(
+            out_frame,
+            text="Excel/CSV の空セル(NaN)・連続空行を除去",
+            variable=self._compress_table_blanks_var,
+            command=self._on_compress_table_blanks_toggle,
+        ).grid(row=3, column=0, columnspan=4, sticky="w", padx=12, pady=(0, 10))
 
         # --- Buttons -----------------------------------------------------
         btn_frame = ctk.CTkFrame(root, fg_color="transparent")
@@ -450,6 +463,7 @@ class MdConverterApp:
             self.converter, sources, out_dir,
             save_images=self._save_images,
             extract_tables=self._extract_tables,
+            compress_table_blanks=self._compress_table_blanks,
         )
         self.worker.start()
         self._set_running(True)
@@ -588,6 +602,11 @@ class MdConverterApp:
     def _on_extract_tables_toggle(self) -> None:
         self._extract_tables = self._extract_tables_var.get()
         self._settings["extract_tables"] = self._extract_tables
+        _save_settings(self._settings)
+
+    def _on_compress_table_blanks_toggle(self) -> None:
+        self._compress_table_blanks = self._compress_table_blanks_var.get()
+        self._settings["compress_table_blanks"] = self._compress_table_blanks
         _save_settings(self._settings)
 
     def _set_running(self, running: bool) -> None:

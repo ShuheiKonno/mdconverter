@@ -97,6 +97,7 @@ class Converter:
         log_cb: Optional[LogCallback] = None,
         save_images: bool = False,
         extract_tables: bool = False,
+        compress_table_blanks: bool = False,
     ) -> Path:
         """Convert one local file and write the result as ``<stem>.md``.
 
@@ -152,6 +153,9 @@ class Converter:
                 )
             else:
                 text_content = _strip_image_references(result.text_content or "")
+
+            if compress_table_blanks and src.suffix.lower() in {".xlsx", ".xls", ".csv"}:
+                text_content = _compress_table_blanks(text_content)
 
         dst.write_text(text_content, encoding="utf-8")
 
@@ -371,6 +375,7 @@ class Converter:
         log_cb: Optional[LogCallback] = None,
         save_images: bool = False,
         extract_tables: bool = False,
+        compress_table_blanks: bool = False,
     ) -> BatchResult:
         """Convert a mixed list of files, directories and URLs.
 
@@ -408,6 +413,7 @@ class Converter:
                         log_cb,
                         save_images=save_images,
                         extract_tables=extract_tables,
+                        compress_table_blanks=compress_table_blanks,
                     )
                 result = ConversionItemResult(
                     source=label, destination=dst, success=True
@@ -513,6 +519,57 @@ def _strip_image_references(text: str) -> str:
     stripped = _DATA_URI_IMG_RE.sub("", text)
     stripped = _FILE_IMG_RE.sub("", stripped)
     return _EXTRA_BLANKS_RE.sub("\n\n", stripped)
+
+
+# Pandas to_html() with na_rep="NaN" (default) emits literal "NaN" for empty
+# cells in Excel output. Lookbehind/ahead on `|` so consecutive
+# `|NaN|NaN|NaN|` sequences all match without the shared pipe blocking us.
+_TABLE_NAN_CELL_RE = re.compile(r"(?<=\|)\s*NaN\s*(?=\|)")
+# Blank Markdown table row: only pipes and whitespace, e.g. `|  |  |  |`.
+# Requires 2+ pipes so a stray single `|` line cannot match.
+_BLANK_TABLE_ROW_RE = re.compile(r"^\s*\|(?:\s*\|)+\s*$")
+
+
+def _compress_table_blanks(text: str) -> str:
+    """Strip ``NaN`` cells and collapse runs of blank rows in Markdown tables.
+
+    Excel sheets imported through pandas render empty cells as the string
+    ``NaN`` and frequently contain wide stretches of fully-empty rows. Both
+    are pure noise for the AI consumers this tool targets and inflate token
+    counts measurably on sparse spreadsheets.
+
+    The transform is two-step:
+      1. Replace any cell whose entire content is ``NaN`` with an empty cell.
+      2. Walk lines and keep only the first row of each consecutive blank-row
+         run.
+
+    The header separator ``| --- | --- |`` is preserved (contains ``---``,
+    not whitespace). A cell containing a substring like ``Total: NaN`` is
+    untouched because the regex requires the entire cell to be ``NaN``.
+
+    .. warning::
+       This is a destructive transform: a cell whose entire value is
+       literally the string ``NaN`` (e.g. scientific data, lab results) is
+       indistinguishable from a pandas-emitted blank in the rendered
+       Markdown and will also be cleared. The feature is therefore opt-in
+       (default ``False``); callers must explicitly request it.
+    """
+    if not text:
+        return text
+    text = _TABLE_NAN_CELL_RE.sub(" ", text)
+    lines = text.split("\n")
+    out: List[str] = []
+    in_blank_run = False
+    for line in lines:
+        if _BLANK_TABLE_ROW_RE.match(line):
+            if in_blank_run:
+                continue
+            in_blank_run = True
+            out.append(line)
+        else:
+            in_blank_run = False
+            out.append(line)
+    return "\n".join(out)
 
 
 def _is_uri(value: Union[str, Path]) -> bool:
