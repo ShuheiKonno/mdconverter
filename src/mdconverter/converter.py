@@ -668,9 +668,8 @@ def _format_markdown_table(rows) -> str:
 def _format_table_cell(cell) -> str:
     if cell is None:
         return ""
-    text = str(cell)
-    # Markdown 表のセルは 1 行に収める必要があるので改行は <br> にする
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    text = text.replace("|", r"\|")
-    text = text.replace("\n", "<br>")
-    return text.strip()
+    # 改行を <br> に変換する前に strip する。後でやると先頭/末尾の改行が
+    # `<br>` になって取り除けない。
+    text = str(cell).replace("\r\n", "\n").replace("\r", "\n").strip()
+    text = text.replace("|", r"\|").replace("\n", "<br>")
+    return text
