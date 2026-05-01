@@ -260,14 +260,24 @@ class MdConverterApp:
         self.file_label = ctk.CTkLabel(prog_frame, text="-", width=120)
         self.file_label.grid(row=1, column=2, padx=(6, 12), pady=(4, 10))
 
-        # --- Version footer ---------------------------------------------
+        # --- Footer (copyright + version) -------------------------------
+        footer = ctk.CTkFrame(root, fg_color="transparent")
+        footer.grid(row=4, column=0, sticky="ew", padx=14, pady=(8, 8))
+        footer.grid_columnconfigure(0, weight=1)
+
         ctk.CTkLabel(
-            root,
-            text=f"mdconverter v{__version__}",
-            anchor="e",
+            footer,
+            text="Copyright (c) 2026 Shuhei Konno",
             text_color=("gray50", "gray60"),
             font=ctk.CTkFont(size=10),
-        ).grid(row=4, column=0, sticky="e", padx=14, pady=(8, 8))
+        ).grid(row=0, column=0, sticky="w")
+
+        ctk.CTkLabel(
+            footer,
+            text=f"mdconverter v{__version__}",
+            text_color=("gray50", "gray60"),
+            font=ctk.CTkFont(size=10),
+        ).grid(row=0, column=1, sticky="e")
 
     def _build_file_tab(self, parent) -> None:
         parent.grid_columnconfigure(0, weight=1)
