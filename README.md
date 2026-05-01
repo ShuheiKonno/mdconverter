@@ -1,6 +1,6 @@
 # mdconverter
 
-**バージョン**: 0.4.0
+**バージョン**: 0.4.2
 
 ローカルで動くシンプルな Markdown 変換ソフトです。
 [microsoft/markitdown](https://github.com/microsoft/markitdown) をコアに、
